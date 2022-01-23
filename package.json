@@ -7,7 +7,8 @@
     "start": "react-scripts start",
     "build": "react-scripts build",
     "test": "react-scripts test",
-    "eject": "react-scripts eject"
+    "eject": "react-scripts eject",
+    "prepare": "husky install"
   },
   "dependencies": {
     "@0x/order-utils": "^10.2.4",
@@ -30,6 +31,8 @@
     "web3-provider-engine": ""
   },
   "devDependencies": {
+    "@commitlint/cli": "^16.1.0",
+    "@commitlint/config-conventional": "^16.0.0",
     "request": "^2.81.0"
   },
   "repository": {
