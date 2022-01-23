@@ -135,31 +135,27 @@ const checkedOrders = [];
 let profitableArbFound = false;
 async function checkArb(args) {
   const { zrxOrder, metadata, assetOrder } = args;
+  const { takerAssetAmount: amountToGain, makerAssetAmount: offerAmount } =
+    zrxOrder;
 
   // Track order
-  // TODO remove this check! I.e. just because the order on 0x hasn't changed doesn't mean that the AMM prices haven't changed.
   // Also, once I will handle partially filled orders, it will be important to check orders again as the fill amount may have increased
   const tempOrderID = JSON.stringify(zrxOrder);
+  console.log(`zrxOrder: ${zrxOrder}`);
+  console.log(`assetOrder: ${assetOrder}`);
   let amountLeft = metadata.remainingFillableTakerAssetAmount;
-
-  // Skip if order checked
-  if (checkedOrders.includes(tempOrderID)) {
-    // console.log('Order already checked')
-    return; // Don't log
-  }
 
   // Add to checked orders
   checkedOrders.push(tempOrderID);
 
   // Skip if Maker Fee
   // TODO does this even make sense? The bot is always going to be the taker, plus I haven't yet seen any maker fee on 0x other than 0
-  if (zrxOrder.makerFee.toString() !== "0") {
-    console.log("Order has maker fee");
+  if (offerAmount.toString() <= 0 || amountToGain.toString() <= 0) {
     return;
   }
 
   // This becomes the input amount
-  let inputAssetAmount = zrxOrder.takerAssetAmount;
+  let inputAssetAmount = amountToGain;
 
   // Build order tuple
   const orderTuple = [
@@ -180,7 +176,9 @@ async function checkArb(args) {
   ];
 
   // Fetch order status
-  // const orderInfo = await zrxExchangeContract.methods.getOrderInfo(orderTuple).call()
+  const orderInfo = await zrxExchangeContract.methods
+    .getOrderInfo(orderTuple)
+    .call();
   /*
   	struct OrderInfo {
     uint8 orderStatus;                    // Status that describes order's validity and fillability.
@@ -189,6 +187,8 @@ async function checkArb(args) {
 	}
 	*/
   // TODO use this public mapping to see the order filled amount https://0x.org/docs/guides/v3-specification#filled
+
+  console.log(orderInfo);
 
   // console.log(typeof inputAssetAmount)
   // Skip if order has been partially filled
@@ -401,6 +401,7 @@ async function checkOrderBook(baseAssetSymbol, quoteAssetSymbol) {
   const zrxData = zrxResponse.data;
 
   const bids = zrxData.bids.records;
+  console.log(bids);
   bids.map((o) => {
     checkArb({
       zrxOrder: o.order,
