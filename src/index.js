@@ -57,6 +57,23 @@ const WETH = "WETH";
 const SAI = "SAI";
 const USDC = "USDC";
 
+const orderTuple = (orderJson) => [
+  orderJson.makerAddress, // Address that created the order.
+  orderJson.takerAddress, // Address that is allowed to fill the order. If set to 0, any address is allowed to fill the order.
+  orderJson.feeRecipientAddress, // Address that will recieve fees when order is filled.
+  orderJson.senderAddress, // Address that is allowed to call Exchange contract methods that affect this order. If set to 0, any address is allowed to call these methods.
+  orderJson.makerAssetAmount, // Amount of makerAsset being offered by maker. Must be greater than 0.
+  orderJson.takerAssetAmount, // Amount of takerAsset being bid on by maker. Must be greater than 0.
+  orderJson.makerFee, // Fee paid to feeRecipient by maker when order is filled.
+  orderJson.takerFee, // Fee paid to feeRecipient by taker when order is filled.
+  orderJson.expirationTimeSeconds, // Timestamp in seconds at which order expires.
+  orderJson.salt, // Arbitrary number to facilitate uniqueness of the order's hash.
+  orderJson.makerAssetData, // Encoded data that can be decoded by a specified proxy contract when transferring makerAsset. The leading bytes4 references the id of the asset proxy.
+  orderJson.takerAssetData, // Encoded data that can be decoded by a specified proxy contract when transferring takerAsset. The leading bytes4 references the id of the asset proxy.
+  orderJson.makerFeeAssetData, // Encoded data that can be decoded by a specified proxy contract when transferring makerFeeAsset. The leading bytes4 references the id of the asset proxy.
+  orderJson.takerFeeAssetData, // Encoded data that can be decoded by a specified proxy contract when transferring takerFeeAsset. The leading bytes4 references the id of the asset proxy.
+];
+
 // ASSET ADDRESSES
 // https://api.1inch.exchange/v1.1/tokens
 const ASSET_ADDRESSES = {
@@ -133,16 +150,19 @@ async function fetchOneSplitData(args) {
 // CHECK TO SEE IF ORDER CAN BE ARBITRAGED
 const checkedOrders = [];
 let profitableArbFound = false;
+const profitableArbs = [];
 async function checkArb(args) {
   const { zrxOrder, metadata, assetOrder } = args;
-  const { takerAssetAmount: amountToGain, makerAssetAmount: offerAmount } =
-    zrxOrder;
+  const {
+    takerFee,
+    takerAssetAmount: amountToGain,
+    makerFee,
+    makerAssetAmount: offerAmount,
+  } = zrxOrder;
 
   // Track order
   // Also, once I will handle partially filled orders, it will be important to check orders again as the fill amount may have increased
   const tempOrderID = JSON.stringify(zrxOrder);
-  console.log(`zrxOrder: ${zrxOrder}`);
-  console.log(`assetOrder: ${assetOrder}`);
   let amountLeft = metadata.remainingFillableTakerAssetAmount;
 
   // Add to checked orders
@@ -150,34 +170,19 @@ async function checkArb(args) {
 
   // Skip if Maker Fee
   // TODO does this even make sense? The bot is always going to be the taker, plus I haven't yet seen any maker fee on 0x other than 0
-  if (offerAmount.toString() <= 0 || amountToGain.toString() <= 0) {
-    return;
-  }
+  // if (offerAmount.toString() <= 0 || amountToGain.toString() <= 0) {
+  //   return;
+  // }
 
   // This becomes the input amount
   let inputAssetAmount = amountToGain;
 
   // Build order tuple
-  const orderTuple = [
-    zrxOrder.makerAddress, // Address that created the order.
-    zrxOrder.takerAddress, // Address that is allowed to fill the order. If set to 0, any address is allowed to fill the order.
-    zrxOrder.feeRecipientAddress, // Address that will recieve fees when order is filled.
-    zrxOrder.senderAddress, // Address that is allowed to call Exchange contract methods that affect this order. If set to 0, any address is allowed to call these methods.
-    zrxOrder.makerAssetAmount, // Amount of makerAsset being offered by maker. Must be greater than 0.
-    zrxOrder.takerAssetAmount, // Amount of takerAsset being bid on by maker. Must be greater than 0.
-    zrxOrder.makerFee, // Fee paid to feeRecipient by maker when order is filled.
-    zrxOrder.takerFee, // Fee paid to feeRecipient by taker when order is filled.
-    zrxOrder.expirationTimeSeconds, // Timestamp in seconds at which order expires.
-    zrxOrder.salt, // Arbitrary number to facilitate uniqueness of the order's hash.
-    zrxOrder.makerAssetData, // Encoded data that can be decoded by a specified proxy contract when transferring makerAsset. The leading bytes4 references the id of the asset proxy.
-    zrxOrder.takerAssetData, // Encoded data that can be decoded by a specified proxy contract when transferring takerAsset. The leading bytes4 references the id of the asset proxy.
-    zrxOrder.makerFeeAssetData, // Encoded data that can be decoded by a specified proxy contract when transferring makerFeeAsset. The leading bytes4 references the id of the asset proxy.
-    zrxOrder.takerFeeAssetData, // Encoded data that can be decoded by a specified proxy contract when transferring takerFeeAsset. The leading bytes4 references the id of the asset proxy.
-  ];
+  const orderT = orderTuple(zrxOrder);
 
   // Fetch order status
   const orderInfo = await zrxExchangeContract.methods
-    .getOrderInfo(orderTuple)
+    .getOrderInfo(orderT)
     .call();
   /*
   	struct OrderInfo {
@@ -188,12 +193,10 @@ async function checkArb(args) {
 	*/
   // TODO use this public mapping to see the order filled amount https://0x.org/docs/guides/v3-specification#filled
 
-  console.log(orderInfo);
-
-  // console.log(typeof inputAssetAmount)
   // Skip if order has been partially filled
-  // if(orderInfo.orderTakerAssetFilledAmount.toString() !== '0') {
-  if (amountLeft != zrxOrder.takerAssetAmount) {
+
+  if (orderInfo.orderTakerAssetFilledAmount.toString() !== "0") return;
+  if (amountLeft !== amountToGain) {
     amountLeft = web3.utils.fromWei(
       metadata.remainingFillableTakerAssetAmount,
       "ether"
@@ -211,7 +214,7 @@ async function checkArb(args) {
   const oneSplitData = await fetchOneSplitData({
     fromToken: ASSET_ADDRESSES[assetOrder[1]],
     toToken: ASSET_ADDRESSES[assetOrder[2]],
-    amount: zrxOrder.makerAssetAmount,
+    amount: offerAmount,
   });
 
   // This becomes the outputAssetAmount
@@ -224,14 +227,15 @@ async function checkArb(args) {
 
   let netProfit;
 
-  if (zrxOrder.takerFee.toString() !== "0") {
+  if (takerFee.toString() !== "0") {
     // the fee's currency is the taker asset, i.e. DAI
     // TODO make the net profit calculation look cleaner by assigning the results of if statements to constants
     // e.g. the below line should look like: if(takerFeeAsset == ASSET_ADDRESSES[assetOrder[0])
-    if (
-      "0x" + zrxOrder.takerFeeAssetData.substring(34, 74) ==
-      ASSET_ADDRESSES[assetOrder[0]]
-    ) {
+    const takerFeeAssetAmount = `0x${zrxOrder.takerFeeAssetData.substring(
+      34,
+      74
+    )}`;
+    if (takerFeeAssetAmount === ASSET_ADDRESSES[assetOrder[0]]) {
       console.log(
         "Order has taker fees, payable in TAKER asset: " + assetOrder[0]
       );
@@ -239,19 +243,15 @@ async function checkArb(args) {
       // the fee currency is usually the taker asset, i.e. it is the same currency as the other amounts in the netProfit calculation and can be subtracted as is
       // however additional logic is needed to handle cases where the taker fee is in the maker currency, which would require converting the amount to the taker currency amount before subtracting it
       netProfit =
-        outputAssetAmount -
-        inputAssetAmount -
-        estimatedGasFee -
-        zrxOrder.takerFee;
-    } else if (
-      "0x" + zrxOrder.takerFeeAssetData.substring(34, 74) ==
-      ASSET_ADDRESSES[assetOrder[1]]
-    ) {
+        outputAssetAmount - inputAssetAmount - estimatedGasFee - takerFee;
+    } else if (takerFeeAssetAmount === ASSET_ADDRESSES[assetOrder[1]]) {
       // could just be just an 'else', but better being explicit
       console.log(
         "Order has taker fees, payable in MAKER asset: " + assetOrder[1]
       );
-      return; // TODO remove this and account for change of asset in net profit calculation
+
+      netProfit =
+        outputAssetAmount - inputAssetAmount - estimatedGasFee - makerFee;
     } else {
       // this should never be the case, but better be safe.
       // I.e. it is neither 0x nor taker or maker asset address
@@ -274,15 +274,6 @@ async function checkArb(args) {
   // If profitable, then stop looking and trade!
   if (profitable) {
     console.log(zrxOrder);
-    // Skip if another profitable arb has already been found
-    // TODO remove this check, this value will be set to true never not back to false, meaning the bot will stop after the first arb
-    // doesnt even make much sense since if this is always true, the interval will always clear, why return here after the bot has already done many api calls...
-    if (profitableArbFound) {
-      return;
-    }
-
-    // Tell the app that a profitable arb has been found
-    profitableArbFound = true;
 
     // Log the arb
     console.table([
@@ -304,7 +295,14 @@ async function checkArb(args) {
     playSound();
 
     // Call arb contract
-    // await trade(assetOrder[0], ASSET_ADDRESSES[assetOrder[0]], ASSET_ADDRESSES[assetOrder[1]], zrxOrder, inputAssetAmount, oneSplitData)
+    await trade(
+      assetOrder[0],
+      ASSET_ADDRESSES[assetOrder[0]],
+      ASSET_ADDRESSES[assetOrder[1]],
+      zrxOrder,
+      inputAssetAmount,
+      oneSplitData
+    );
     /*
   		TODO don't just settle for greater than 0 and then stop, rather finish going through all 0x orders and then chose the most profitable one to begin with!
 			TODO even better, rather than going through them sequentially like an idiot, why not sort the orders by the best exchange rate first!?!?!?!
@@ -328,32 +326,16 @@ async function trade(
   const FROM_AMOUNT = fillAmount; // '1000000'
   const TO_TOKEN = arbTokenAddress;
 
-  const ONE_SPLIT_SLIPPAGE = "0.995";
   // TODO, make that slippage dynamic. Also, why is the slippage calculated in here and not subtracted earlier when calculating profitability?
+  const ONE_SPLIT_SLIPPAGE = "0.995";
 
-  // TODO remove duplication
-  const orderTuple = [
-    orderJson.makerAddress,
-    orderJson.takerAddress,
-    orderJson.feeRecipientAddress,
-    orderJson.senderAddress,
-    orderJson.makerAssetAmount,
-    orderJson.takerAssetAmount,
-    orderJson.makerFee,
-    orderJson.takerFee,
-    orderJson.expirationTimeSeconds,
-    orderJson.salt,
-    orderJson.makerAssetData,
-    orderJson.takerAssetData,
-    orderJson.makerFeeAssetData,
-    orderJson.takerFeeAssetData,
-  ];
+  const orderT = orderTuple(orderJson);
 
   // Format ZRX function call data
   const takerAssetFillAmount = FROM_AMOUNT;
   const signature = orderJson.signature;
   const data = web3.eth.abi.encodeFunctionCall(FILL_ORDER_ABI, [
-    orderTuple,
+    orderT,
     takerAssetFillAmount,
     signature,
   ]);
@@ -372,9 +354,9 @@ async function trade(
   // Perform Trade
   receipt = await traderContract.methods
     .getFlashloan(
-      flashTokenAddress, // address flashToken,
+      FROM_TOKEN, // address flashToken,
       FLASH_AMOUNT, // uint256 flashAmount,
-      arbTokenAddress, // address arbToken,
+      TO_TOKEN, // address arbToken,
       data, // bytes calldata zrxData,
       minReturnWtihSplippage.toString(), // uint256 oneSplitMinReturn,
       distribution // uint256[] calldata oneSplitDistribution
@@ -384,7 +366,7 @@ async function trade(
       gas: process.env.GAS_LIMIT,
       gasPrice: web3.utils.toWei(process.env.GAS_PRICE, "Gwei"),
     });
-  console.log(receipt);
+  return console.log(receipt);
 }
 
 // FETCH ORDERBOOK
@@ -394,21 +376,18 @@ async function checkOrderBook(baseAssetSymbol, quoteAssetSymbol) {
   const baseAssetAddress = ASSET_ADDRESSES[baseAssetSymbol].substring(2, 42);
   const quoteAssetAddress = ASSET_ADDRESSES[quoteAssetSymbol].substring(2, 42);
   // https://api.0x.org/sra/v3/orders?page=1&perPage=1000&makerAssetProxyId=0xf47261b0&takerAssetProxyId=0xf47261b0&makerAssetAddress=0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2&takerAssetAddress=0x6b175474e89094c44da98b954eedeac495271d0f
-  const zrxResponse = await axios.get(
+  const { data: zrxData } = await axios.get(
     `https://api.0x.org/sra/v3/orderbook?baseAssetData=0xf47261b0000000000000000000000000${baseAssetAddress}&quoteAssetData=0xf47261b0000000000000000000000000${quoteAssetAddress}&perPage=1000`
   );
-  // TODO (optional) refactor, i.e. more readable by assigning the url params to variables for example
-  const zrxData = zrxResponse.data;
-
-  const bids = zrxData.bids.records;
-  console.log(bids);
-  bids.map((o) => {
-    checkArb({
-      zrxOrder: o.order,
-      metadata: o.metaData,
-      assetOrder: [baseAssetSymbol, quoteAssetSymbol, baseAssetSymbol],
-    }); // E.G. WETH, DAI, WETH
-  });
+  const { records: bidsToCheck } = zrxData.bids;
+  return bidsToCheck.map(
+    (o) =>
+      checkArb({
+        zrxOrder: o.order,
+        metadata: o.metaData,
+        assetOrder: [baseAssetSymbol, quoteAssetSymbol, baseAssetSymbol],
+      }) // E.G. WETH, DAI, WETH
+  );
 }
 
 // CHECK MARKETS
@@ -425,12 +404,6 @@ async function checkMarkets() {
 	e.g. instead of doing 0x to 1inch you need to do from exchange a to exchange b.
 	defiprime.com/exchanges
 	*/
-
-  // Stop checking markets if already found
-  // TODO remove this
-  if (profitableArbFound) {
-    clearInterval(marketChecker);
-  }
 
   console.log(`Fetching market data @ ${now()} ...\n`);
   checkingMarkets = true;
@@ -455,6 +428,6 @@ playSound();
 
 // Check markets every n seconds
 const POLLING_INTERVAL = process.env.POLLING_INTERVAL || 3000; // 3 seconds
-const marketChecker = setInterval(async () => {
+setInterval(async () => {
   await checkMarkets();
 }, POLLING_INTERVAL);
