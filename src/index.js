@@ -427,7 +427,7 @@ async function checkMarkets() {
 playSound();
 
 // Check markets every n seconds
-const POLLING_INTERVAL = process.env.POLLING_INTERVAL || 3000; // 3 seconds
+const POLLING_INTERVAL = process.env.POLLING_INTERVAL || 5000; // 5 seconds
 setInterval(async () => {
   await checkMarkets();
 }, POLLING_INTERVAL);
